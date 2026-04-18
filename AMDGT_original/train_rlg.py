@@ -101,13 +101,11 @@ if __name__ == '__main__':
         X_test = torch.LongTensor(data['X_test'][i]).to(device)
         Y_test = data['Y_test'][i].flatten()
 
-        # Tối ưu hóa Loss: Dùng BCEWithLogitsLoss ổn định hơn cho Link Prediction
-        n_pos = torch.sum(Y_train).float()
-        n_neg = (Y_train.numel() - n_pos)
-        # Khống chế trọng số tối đa là 20 để tránh nổ Gradient gây lỗi CUBLAS
-        pos_weight_val = min(n_neg / n_pos, 20.0)
-        pos_weight = torch.tensor([pos_weight_val]).to(device)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        # Khôi phục CrossEntropyLoss (bản đạt AUC 0.97039)
+        n_pos = torch.sum(Y_train).float().item()
+        n_neg = Y_train.numel() - n_pos
+        weight_ratio = min(n_neg / max(n_pos, 1), 10.0)
+        criterion = nn.CrossEntropyLoss(weight=torch.tensor([1.0, weight_ratio]).to(device))
 
         drdipr_graph, data = dgl_heterograph(data, data['X_train'][i], args)
         drdipr_graph = drdipr_graph.to(device)
@@ -117,16 +115,12 @@ if __name__ == '__main__':
         for epoch in range(args.epochs):
             model.train()
             _, train_score = model(drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, X_train)
-            
-            # Chuyển nhãn sang float cho BCE
-            targets = Y_train.float().view(-1, 1)
-            # Lấy logit của class 1 (liên kết thật)
-            logits = train_score[:, 1].view(-1, 1)
-            
-            train_loss = criterion(logits, targets)
+            train_loss = criterion(train_score, torch.flatten(Y_train))
             
             optimizer.zero_grad()
             train_loss.backward()
+            # Gradient Clipping: Khắc phục CUBLAS Error 13 bằng cách giới hạn gradient
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
 
