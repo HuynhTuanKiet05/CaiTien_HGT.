@@ -53,12 +53,12 @@ if __name__ == '__main__':
     parser.add_argument('--dropout', default=0.2, type=float, help='dropout')
     
     # Model dimensions
-    parser.add_argument('--hgt_in_dim', default=128, type=int, help='HGT input dimension (optimized for 4GB GPU)')
+    parser.add_argument('--hgt_in_dim', default=256, type=int, help='HGT input dimension (optimized with AMP)')
     parser.add_argument('--hgt_layer', default=3, type=int, help='HGT layers')
     parser.add_argument('--hgt_head', default=8, type=int, help='HGT heads')
     parser.add_argument('--gt_layer', default=2, type=int, help='GT layers')
     parser.add_argument('--gt_head', default=2, type=int, help='GT heads')
-    parser.add_argument('--gt_out_dim', default=128, type=int, help='GT output dimension (optimized for 4GB GPU)')
+    parser.add_argument('--gt_out_dim', default=256, type=int, help='GT output dimension (optimized with AMP)')
     parser.add_argument('--tr_layer', default=2, type=int, help='Transformer layers')
     parser.add_argument('--tr_head', default=4, type=int, help='Transformer heads')
     
@@ -127,21 +127,29 @@ if __name__ == '__main__':
         gc.collect()
         torch.cuda.empty_cache()
 
+        # Initialize Mixed Precision Scaler
+        scaler = torch.cuda.amp.GradScaler()
         start = timeit.default_timer()
 
         for epoch in range(args.epochs):
             model.train()
-            # Forward pass
-            _, train_score = model(drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, X_train)
-            train_loss = criterion(train_score, torch.flatten(Y_train))
+            # Forward pass with Mixed Precision
+            with torch.cuda.amp.autocast():
+                _, train_score = model(drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, X_train)
+                train_loss = criterion(train_score, torch.flatten(Y_train))
             
             optimizer.zero_grad()
-            train_loss.backward()
+            # Scaled Backward pass
+            scaler.scale(train_loss).backward()
             
-            # Gradient Clipping to prevent CUBLAS error 13
+            # Unscale before clipping
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             
-            optimizer.step()
+            # Scaler step
+            scaler.step(optimizer)
+            scaler.update()
+            
             scheduler.step()
 
             if (epoch + 1) % 10 == 0 or epoch == 0:

@@ -7,6 +7,46 @@ from .rlg_hgt import RLGHGT
 device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu'))
 
 
+class GRIDecoder(nn.Module):
+    def __init__(self, in_dim, hidden_dim, dropout=0.4):
+        super().__init__()
+        self.dr_gate = nn.Sequential(
+            nn.Linear(in_dim, in_dim),
+            nn.Sigmoid()
+        )
+        self.di_gate = nn.Sequential(
+            nn.Linear(in_dim, in_dim),
+            nn.Sigmoid()
+        )
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim * 4, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 2)
+        )
+
+    def forward(self, dr_h, di_h):
+        g1 = self.dr_gate(dr_h)
+        g2 = self.di_gate(di_h)
+        
+        # Gated states
+        dr_g = dr_h * g1
+        di_g = di_h * g2
+        
+        # Interactions
+        combined = torch.cat([
+            dr_g, 
+            di_g, 
+            dr_g * di_g, 
+            torch.abs(dr_g - di_g)
+        ], dim=-1)
+        
+        return self.mlp(combined)
+
+
 class AMNTDDA(nn.Module):
     def __init__(self, args):
         super(AMNTDDA, self).__init__()
@@ -51,18 +91,8 @@ class AMNTDDA(nn.Module):
             use_topological=getattr(args, 'use_topological', True),
         )
 
-        self.mlp = nn.Sequential(
-            nn.Linear(args.gt_out_dim * 2, 1024),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(1024, 1024),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(1024, 256),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(256, 2)
-        )
+        # Replacing the simple MLP with GRIDecoder
+        self.decoder = GRIDecoder(in_dim=args.gt_out_dim * 2, hidden_dim=1024, dropout=0.4)
 
 
     def forward(self, drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, sample):
@@ -95,9 +125,9 @@ class AMNTDDA(nn.Module):
         dr = dr.reshape(self.args.drug_number, 2 * self.args.gt_out_dim)
         di = di.reshape(self.args.disease_number, 2 * self.args.gt_out_dim)
 
-        drdi_embedding = torch.mul(dr[sample[:, 0]], di[sample[:, 1]])
+        output = self.decoder(dr[sample[:, 0]], di[sample[:, 1]])
 
-        output = self.mlp(drdi_embedding)
+        return dr, output
 
         return dr, output
 
